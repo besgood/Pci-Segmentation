@@ -1,63 +1,68 @@
+readme_content = """
+PCI Segmentation Scanner
+=========================
 
-# PCI Segmentation Scan Tool
+This tool performs PCI segmentation testing and generates compliance reports in Excel and HTML formats.
 
-This tool performs a network segmentation scan to validate PCI compliance, checking for open ports on target systems.
+Requirements:
+-------------
+- Python 3.x
+- `nmap` and the `python-nmap` module (for Nmap scanning)
+- `masscan` installed and in system path (for Masscan scanning)
+- `pandas`, `openpyxl`, `tqdm`
 
----
+Install required Python packages:
 
-## Requirements
+    pip install nmap pandas openpyxl tqdm
 
-### 1. Install Python Packages
+Usage:
+------
 
-```bash
-pip install nmap pandas xlsxwriter tqdm
-```
+    python pci_scan.py --hostfile targets.txt --sourceip 192.168.1.10 --output pci_results [OPTIONS]
 
-### 2. Install Nmap
+Required Arguments:
+-------------------
+--hostfile       : Path to a file with one target IP per line
+--sourceip       : Source IP used during the scan
+--output         : Base name for output files
 
-- **Linux (Debian/Ubuntu):** `sudo apt install nmap`
-- **macOS:** `brew install nmap`
-- **Windows:** [https://nmap.org/download.html](https://nmap.org/download.html)
+Scanner Selection:
+------------------
+--scanner        : Choose `nmap` (default) or `masscan`
 
----
+Scan Port Selection:
+--------------------
+--portscope      : Use with Nmap to define scope (`top100`, `top1000`, `top10000`, `all`)
+--best-practice  : Ignores `--portscope` and scans a curated list of PCI-relevant ports
 
-## How to Use
+Protocol Options (only applies to Nmap):
+----------------------------------------
+--protocol       : `tcp`, `udp`, or `both`
 
-### Step 1: Prepare a list of target IPs
+Examples:
+---------
+Scan using Nmap with best practice ports:
 
-Create a file `targets.txt` with one IP address per line.
+    python pci_scan.py --hostfile targets.txt --sourceip 192.168.1.10 --output pci_results --scanner nmap --best-practice --protocol tcp
 
-```
-192.168.1.10
-192.168.1.20
-```
+Scan using Masscan with best practice ports:
 
-### Step 2: Run the Scanner
+    python pci_scan.py --hostfile targets.txt --sourceip 192.168.1.10 --output pci_results --scanner masscan --best-practice
 
-```bash
-python pci_segmentation_scan.py --hostfile targets.txt --portscope top100 --sourceip 192.168.1.1 --output scanresults
-```
+Resume a previous interrupted scan:
 
-You will be prompted to select TCP, UDP, or both, and confirm if you want to proceed with slower UDP scans.
+    Simply run the same command again; progress is automatically saved and resumed.
 
-### Options
+Outputs:
+--------
+- Excel file with full scan results
+- Excel file with PASS/FAIL compliance summary
+- HTML report for visual review
+"""
 
-- `--hostfile`: File containing list of target IPs
-- `--portscope`: `top100`, `top1000`, `top10000`, `all`
-- `--sourceip`: IP of the scanning machine
-- `--output`: Prefix name for output files
+# Save to README.txt
+readme_path = "/mnt/data/README.txt"
+with open(readme_path, "w") as f:
+    f.write(readme_content)
 
----
-
-## Output
-
-- `scanresults_scan.xlsx`: Full scan result
-- `scanresults_compliance.xlsx`: Summary of compliance (PASS/FAIL)
-- `scanresults_report.html`: Color-coded HTML report
-
----
-
-## Notes
-
-- UDP scans are significantly slower and less reliable. Proceed only if necessary.
-- The script supports resuming interrupted scans.
+readme_path
