@@ -1,5 +1,5 @@
 import argparse
-import nmap
+import subprocess
 import pandas as pd
 import time
 import os
@@ -7,6 +7,7 @@ import json
 from tqdm import tqdm
 from itertools import islice
 from datetime import datetime
+import nmap
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -41,6 +42,10 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# Best-practice port list (TCP only for now)
+BEST_PRACTICE_PORTS = [20, 21, 22, 23, 25, 53, 80, 110, 135, 137, 138, 139, 143,
+                       443, 445, 1433, 1521, 3306, 3389, 5432, 5900]
+
 # --- Resume Utilities ---
 
 def save_resume_state(file, scanned_batches):
@@ -62,39 +67,13 @@ def clear_resume_state(file):
 def parse_args():
     parser = argparse.ArgumentParser(description="PCI Segmentation Test and Compliance Report Generator")
     parser.add_argument('--hostfile', required=True, help='Path to file with target IPs')
-    parser.add_argument('--portscope', required=True, choices=['top100', 'top1000', 'top10000', 'all'], help='Port scope to scan')
+    parser.add_argument('--portscope', choices=['top100', 'top1000', 'top10000', 'all'], help='Port scope to scan')
+    parser.add_argument('--protocol', choices=['tcp', 'udp', 'both'], help='Protocol(s) to scan')
     parser.add_argument('--sourceip', required=True, help='Manually specify source IP')
     parser.add_argument('--output', required=True, help='Base name for output files')
+    parser.add_argument('--scanner', choices=['nmap', 'masscan'], default='nmap', help='Scanner to use (default: nmap)')
+    parser.add_argument('--best-practice', action='store_true', help='Use PCI best-practice ports')
     return parser.parse_args()
-
-# --- Protocol Prompt ---
-
-def get_protocol_choice():
-    print("Select protocol to scan:")
-    print("1) TCP")
-    print("2) UDP (warning: very slow and often unreliable)")
-    print("3) BOTH (TCP + UDP)")
-
-    choice = input("Enter choice (1/2/3): ").strip()
-    if choice == "1":
-        return "tcp"
-    elif choice == "2":
-        confirm = input("UDP can be slow and produce false positives. Proceed? (y/n): ").strip().lower()
-        if confirm == 'y':
-            return "udp"
-        else:
-            print("Aborting.")
-            exit(1)
-    elif choice == "3":
-        confirm = input("UDP can slow down the scan significantly. Proceed with BOTH? (y/n): ").strip().lower()
-        if confirm == 'y':
-            return "both"
-        else:
-            print("Aborting.")
-            exit(1)
-    else:
-        print("Invalid selection.")
-        return get_protocol_choice()
 
 # --- Helpers ---
 
@@ -110,23 +89,33 @@ def get_port_range(scope):
         "all": " -p-"
     }.get(scope, "")
 
-def run_scan_batch(hosts, port_scope, protocol, scanned_batches, resume_file, batch_index):
+def run_nmap_scan(hosts, port_scope, protocol, best_practice):
     nm = nmap.PortScanner()
     host_str = ' '.join(hosts)
-    port_range = get_port_range(port_scope)
-    args = f"-Pn -T4 {port_range} --min-parallelism 10 --max-retries 1"
+    if best_practice:
+        port_str = '-p ' + ','.join(str(p) for p in BEST_PRACTICE_PORTS)
+    else:
+        port_str = get_port_range(port_scope)
 
-    scan_flags = '-sS' if protocol == 'tcp' else '-sU'
-    if protocol == 'udp':
-        args += ' --max-scan-delay 100'
+    args = f"-Pn -T4 {port_str} --min-parallelism 10 --max-retries 1"
 
-    print(f"\nScanning ({protocol.upper()}): {host_str}")
-    try:
-        nm.scan(hosts=host_str, arguments=f"{scan_flags} {args}")
-    except Exception as e:
-        print(f"Scan failed for batch {batch_index} with error: {e}")
-        return []
+    results = []
+    if protocol in ['tcp', 'both']:
+        print(f"\nScanning (TCP): {host_str}")
+        nm.scan(hosts=host_str, arguments=f"-sS {args}")
+        results += parse_nmap_results(nm)
 
+    if protocol in ['udp', 'both']:
+        confirm = input("WARNING: UDP scans are slow and unreliable. Continue? (y/n): ").lower()
+        if confirm != 'y':
+            return results
+        print(f"\nScanning (UDP): {host_str}")
+        nm.scan(hosts=host_str, arguments=f"-sU {args} --max-scan-delay 100")
+        results += parse_nmap_results(nm)
+
+    return results
+
+def parse_nmap_results(nm):
     results = []
     for host in nm.all_hosts():
         for proto in nm[host].all_protocols():
@@ -139,13 +128,34 @@ def run_scan_batch(hosts, port_scope, protocol, scanned_batches, resume_file, ba
                     'Port': port,
                     'Port State': state
                 })
+    return results
 
-    scanned_batches.append(batch_index)
-    save_resume_state(resume_file, scanned_batches)
+def run_masscan_scan(hosts, output_file, best_practice):
+    ports = ','.join(str(p) for p in BEST_PRACTICE_PORTS) if best_practice else '0-65535'
+    host_str = ','.join(hosts)
+    cmd = [
+        'masscan', host_str,
+        '-p', ports,
+        '--rate', '10000',
+        '-oJ', output_file
+    ]
+    print(f"Running Masscan: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    with open(output_file) as f:
+        data = json.load(f)
+    results = []
+    for entry in data:
+        for port in entry['ports']:
+            results.append({
+                'IP Address': entry['ip'],
+                'Protocol': port['proto'].upper(),
+                'Port': port['port'],
+                'Port State': 'open'
+            })
     return results
 
 def save_excel(results, source_ip, batches, filename):
-    writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+    writer = pd.ExcelWriter(filename, engine='openpyxl')
     df = pd.DataFrame(results)
     df.sort_values(by=['IP Address', 'Protocol', 'Port'], inplace=True)
     df.to_excel(writer, sheet_name='Scan Results', index=False)
@@ -172,7 +182,7 @@ def analyze_compliance(df):
     return pd.DataFrame(summary)
 
 def save_compliance_excel(df_summary, filename):
-    df_summary.to_excel(filename, index=False, engine='xlsxwriter')
+    df_summary.to_excel(filename, index=False)
     print(f"Compliance summary saved to: {filename}")
 
 def save_html_report(summary_df, source_ip, filename):
@@ -180,7 +190,7 @@ def save_html_report(summary_df, source_ip, filename):
     for _, row in summary_df.iterrows():
         status_class = "pass" if row['Compliance Status'] == 'PASS' else "fail"
         rows += f"""
-        <tr class="{status_class}">
+        <tr class=\"{status_class}\">
             <td>{row['IP Address']}</td>
             <td>{row['Total Ports Scanned']}</td>
             <td>{row['Open Ports']}</td>
@@ -197,7 +207,6 @@ def save_html_report(summary_df, source_ip, filename):
 
 def main():
     args = parse_args()
-    args.protocol = get_protocol_choice()
 
     with open(args.hostfile) as f:
         hosts = [line.strip() for line in f if line.strip()]
@@ -210,35 +219,31 @@ def main():
     batches = list(chunked_iterable(hosts, 20))
     total_batches = len(batches)
 
-    print(f"\nStarting scan. Resuming from batch {len(scanned_batches) + 1} of {total_batches}")
+    print(f"\nStarting scan using {args.scanner.upper()}. Resuming from batch {len(scanned_batches) + 1} of {total_batches}")
 
     with tqdm(total=total_batches, desc="Scanning Batches", initial=len(scanned_batches), unit="batch") as pbar:
         for i, batch in enumerate(batches, 1):
             if i in scanned_batches:
-                continue  # Skip already scanned
-
+                continue
             batch_map[i] = batch
 
             try:
-                if args.protocol in ['tcp', 'both']:
-                    all_results.extend(run_scan_batch(batch, args.portscope, 'tcp', scanned_batches, resume_file, i))
-                if args.protocol in ['udp', 'both']:
-                    all_results.extend(run_scan_batch(batch, args.portscope, 'udp', scanned_batches, resume_file, i))
+                if args.scanner == 'nmap':
+                    all_results.extend(run_nmap_scan(batch, args.portscope, args.protocol, args.best_practice))
+                elif args.scanner == 'masscan':
+                    tmp_file = f"masscan_output_batch{i}.json"
+                    all_results.extend(run_masscan_scan(batch, tmp_file, args.best_practice))
             except KeyboardInterrupt:
                 print("\nInterrupted. Saving progress.")
                 save_resume_state(resume_file, scanned_batches)
                 exit(1)
 
+            scanned_batches.append(i)
+            save_resume_state(resume_file, scanned_batches)
             pbar.update(1)
-
-            choice = input("\nPress ENTER to continue or type 'pause' to pause: ").strip().lower()
-            if choice == 'pause':
-                print("\nPaused. Press ENTER to resume...")
-                input()
 
     clear_resume_state(resume_file)
 
-    # Output
     scan_excel = f"{args.output}_scan.xlsx"
     save_excel(all_results, args.sourceip, batch_map, scan_excel)
 
@@ -250,17 +255,6 @@ def main():
     save_compliance_excel(df_summary, compliance_excel)
     save_html_report(df_summary, args.sourceip, html_report)
 
-    # Summary Stats
-    total_hosts = len(df_summary)
-    total_pass = (df_summary['Compliance Status'] == 'PASS').sum()
-    total_fail = total_hosts - total_pass
-    total_open_ports = df_scan[df_scan['Port State'] == 'open'].shape[0]
-
-    print("\n--- Scan Summary ---")
-    print(f"Total Hosts Scanned : {total_hosts}")
-    print(f"Compliant Hosts     : {total_pass}")
-    print(f"Non-Compliant Hosts : {total_fail}")
-    print(f"Total Open Ports    : {total_open_ports}")
     print("\nScan and report generation complete.")
 
 if __name__ == "__main__":
