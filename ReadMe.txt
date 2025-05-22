@@ -1,4 +1,3 @@
-readme_content = """
 PCI Segmentation Scanner
 =========================
 
@@ -58,11 +57,4 @@ Outputs:
 - Excel file with full scan results
 - Excel file with PASS/FAIL compliance summary
 - HTML report for visual review
-"""
 
-# Save to README.txt
-readme_path = "/mnt/data/README.txt"
-with open(readme_path, "w") as f:
-    f.write(readme_content)
-
-readme_path
